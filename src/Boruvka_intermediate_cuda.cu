@@ -3,10 +3,34 @@
 #include<cuda.h> 
 #include<cuda_runtime.h>
 #include<ECLgraph.h>
+#include <random>
+#include <chrono>
+
 
 using namespace std; 
 typedef unsigned long long ull; 
 constexpr ull INF = ~0ULL; 
+
+
+static const int      MAX_WEIGHT  = 50;
+static const uint32_t WEIGHT_SEED = 20260907u;
+
+
+static void CheckCuda(const int line)
+{
+  cudaError_t e;
+  cudaDeviceSynchronize();
+  if (cudaSuccess != (e = cudaGetLastError())) {
+	fprintf(stderr, "CUDA error %d on line %d: %s\n", e, line, cudaGetErrorString(e));
+	exit(-1);
+  }
+}
+
+#ifdef DEBUG
+  #define CHECK() CheckCuda(__LINE__)
+#else
+  #define CHECK()
+#endif
 
 
 
@@ -44,36 +68,20 @@ __host__ __device__ __forceinline__ ull edgeKey(int weight, int edge_index) {
 
 // ====================================================== DEVICE Functions   ======================================================
 
-/**
- * @brief Check the calls 
- * @note inherited from the ECL-MST code. 
- * @param line 
- */
-static void CheckCuda(const int line)
-{
-  cudaError_t e;
-  cudaDeviceSynchronize();
-  if (cudaSuccess != (e = cudaGetLastError())) {
-    fprintf(stderr, "CUDA error %d on line %d: %s\n", e, line, cudaGetErrorString(e));
-    exit(-1);
-  }
-}
+
 
 
 
 /**
- * @brief This method will return the parent of the node v
- * 		  Read only implementation with no explicit path contraction 
- * 
- * @todo add parallel safe implementation
- * @param parents 
- * @param src 
- * @return __host__ 
+ * @brief Returns the representative (root) of v.
+ *        O(1) direct lookup: valid because compress_tree_kernel runs at the
+ *        end of every round, so each vertex points directly at its root.	
+ *        Read-only: called only from cheapest_find_kernel, during which no
+ *        unions happen, so parents[] is stable.
  */
-__device__ int device_find( const int* parents, const int v){
-	return 0; 
+__device__ __forceinline__ int device_find(const int* parents, const int v) {
+    return parents[v];
 }
-
 
 /**
  * @brief finds the parents of u and v,
@@ -85,7 +93,7 @@ __device__ int device_find( const int* parents, const int v){
  * @param v 
  * @return __device__ 
  */
-__device__ bool device_union(int* parents, int u, int v) {
+__device__ __forceinline__ bool device_union(int* parents, int u, int v) {
     volatile int* p = parents;
     while (true) {
         u = p[u]; v = p[v];
@@ -163,12 +171,12 @@ __global__ void cheapest_find_kernel( int* parents, ull* cheapest,bool* isActive
 
 
 
+
 /**
  * @brief Construct the MST using by doing the union,
  * 		  We might get the same edge (u-v, v-u) hence union should be done only once 
  * 		  The device_union function should return the false if u-v found to be in same comp to avoid 
  * 		  doubly adding weight to the MST
- * 
  * @param cheapest 
  * @param parents 
  * @param G 
@@ -198,16 +206,32 @@ __global__ void construct_mst_kernel(ull *cheapest,int* parents,ECLgraph G, bool
 
 /**
  * @brief flattens the tree
- * @todo implement full code 
+ * 		 In this code we are not retraceing the path to update every node visited in the path because we have 
+ * 		 thread per vertex, so there would be need to atomics if we want threads to read compressed path, 
+ * @note 
+ * Why compress_tree_kernel needs no atomics:
+ *  1. No concurrent unions: it runs after construct_mst_kernel finishes
+ *     (kernel boundary = global barrier), so roots are fixed during the kernel.
+ *  2. Single writer per slot: thread u writes only parents[u]; no write-write races.
+ *  3. Read-write races are benign: a reader of parents[x] sees either the old
+ *     parent or x's root (aligned 32-bit accesses never tear). Both are
+ *     ancestors on the same path, so the walk reaches the same root.
+ *  4. Guaranteed termination: every parent pointer points to a strictly
+ *     smaller ID (union hooks larger under smaller; compress writes the root,
+ *     the tree's minimum ID), so each step decreases the ID and must stop at
+ *     a root (parents[r] == r). This also rules out cycles.
  * @param parents 
  * @param N 
  * @return __global__ 
  */
-__global__ void compress_tree_kernel( int* parents, int N){
-	int tid = threadIdx.x + blockDim.x * blockIdx.x; 
-	if( tid < N ){
-		int u = tid; 
-	}
+__global__ void compress_tree_kernel(int* parents, int N) {
+    int u = threadIdx.x + blockDim.x * blockIdx.x;
+    if (u >= N) return;
+
+    int root = parents[u];
+    while (root != parents[root]) root = parents[root];   // walk up to the root
+
+    if (parents[u] != root) parents[u] = root;            // skip redundant writes
 }
 
 
@@ -221,7 +245,7 @@ __global__ void compress_tree_kernel( int* parents, int N){
  * @param G ELCgraph containing data on host 
  * @param inMST boolean vector to know if edge is in MST 
  */
-void GPU_MST(ECLgraph G, bool*h_MST 	){
+void GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight	){
 
 	bool* d_MST = NULL; 
 	cudaMalloc(&d_MST, G.edges*sizeof(bool)); 
@@ -272,8 +296,9 @@ void GPU_MST(ECLgraph G, bool*h_MST 	){
 	// parent array, d_isActive initialization is just one time. but d_cheapest needs to reset after every round its done using the cudaMemset
 	int TPB = 256; 
 	int Blocks = (G.nodes + TPB - 1 ) / TPB; 
-	init_parents_kernel<<<Blocks, TPB>>>(d_parent, G.nodes);
 	cudaMemset(d_isActive,1,G.nodes*sizeof(bool));
+	init_parents_kernel<<<Blocks, TPB>>>(d_parent, G.nodes);
+	CHECK(); 
 	
 
 	while( h_changed ){
@@ -288,27 +313,119 @@ void GPU_MST(ECLgraph G, bool*h_MST 	){
 		// function for updating the cheapest array. 
 		// same config as init Parents works here (vertex centric) we have thread per vertex
 		cheapest_find_kernel<<<Blocks, TPB>>>(d_parent,d_cheapest, d_isActive,d_G); 
+		CHECK(); 
 
 		
 		// write here kernle to construct the MST and unify the components using the cheapest outgoing edge
 		// here we will traverse the cheapest array and decide if we want to include the edge in the MST or not 
 		// for launching the kernel we can use the same config as init_parents
 		construct_mst_kernel<<<Blocks,TPB>>>(d_cheapest, d_parent, d_G, d_MST, d_MST_Weight, d_changed); 
+		CHECK(); 
 
 		// compress tree kernel -> flattens the whole tree(parents array); 
-
-		
+		// same config as init_parents (vertex centric)
+		compress_tree_kernel<<<Blocks, TPB>>>(d_parent, G.nodes);
+		CHECK(); 
 
 		// get the value of d_changed 
 		cudaMemcpy(&h_changed, d_changed, sizeof(bool),cudaMemcpyDeviceToHost);
 	}
 	
 
+	// copy results back to host 
+	cudaMemcpy( h_MST, d_MST, G.edges*sizeof(bool), cudaMemcpyDeviceToHost );
+	cudaMemcpy( h_MST_Weight, d_MST_Weight, sizeof(ull), cudaMemcpyDeviceToHost );
+
+	CHECK(); 
+	
+	// free the device memory 
+	cudaFree(d_MST); 
+	cudaFree(d_changed); 
+	cudaFree(d_cheapest); 
+	cudaFree(d_parent); 
+	cudaFree(d_nindex); 
+	cudaFree(d_nlist); 
+	cudaFree(d_eweight); 
+	cudaFree(d_isActive); 
+	cudaFree(d_MST_Weight); 
+
 
 }
 
-int main(){
-	
-	return 0 ; 
-} 
+
+/**
+ * @brief Same logic as ECL_boruvkas.cpp: one random weight per undirected edge
+ *        (u <= v), mirrored to the reverse CSR entry v -> u.
+ */
+void assign_random_weights(ECLgraph& G, int max_weight, uint32_t seed) {
+    if (G.edges == 0) { G.eweight = NULL; return; }
+
+    G.eweight = static_cast<int*>(malloc(G.edges * sizeof(*G.eweight)));
+    if (G.eweight == NULL) {
+        fprintf(stderr, "ERROR: memory allocation failed while assigning weights\n");
+        exit(EXIT_FAILURE);
+    }
+    fill(G.eweight, G.eweight + G.edges, 0);
+
+    mt19937 generator(seed);
+    uniform_int_distribution<int> distribution(1, max_weight);
+
+    for (int u = 0; u < G.nodes; ++u) {
+        for (int i = G.nindex[u]; i < G.nindex[u + 1]; ++i) {
+            const int v = G.nlist[i];
+            if (u > v || G.eweight[i] != 0) continue;
+
+            const int weight = distribution(generator);
+            G.eweight[i] = weight;
+            if (u == v) continue;
+
+            for (int j = G.nindex[v]; j < G.nindex[v + 1]; ++j) {
+                if (G.nlist[j] == u && G.eweight[j] == 0) { G.eweight[j] = weight; break; }
+            }
+        }
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <input.egr>\n", argv[0]);
+        return -1;
+    }
+
+    ECLgraph G = readECLgraph(argv[1]);
+    printf("Graph: %s\nNodes: %d\nEdges: %d\n", argv[1], G.nodes, G.edges);
+
+    if (G.eweight == NULL) {
+        assign_random_weights(G, MAX_WEIGHT, WEIGHT_SEED);
+        printf("Note: no weights in file, generated with seed %u\n", WEIGHT_SEED);
+    }
+
+    bool* h_MST = new bool[G.edges];
+    ull   h_MST_Weight = 0;
+
+    cudaFree(0);   // create the CUDA context now so it isn't counted in the timing
+
+    auto start = chrono::high_resolution_clock::now();
+    GPU_MST(G, h_MST, &h_MST_Weight);
+    auto end = chrono::high_resolution_clock::now();
+    double secs = chrono::duration<double>(end - start).count();
+
+    // Host-side cross-check: recompute weight and edge count from h_MST
+    long long check_weight = 0;
+    int mst_edges = 0;
+    for (int i = 0; i < G.edges; i++) {
+        if (h_MST[i]) { check_weight += G.eweight[i]; mst_edges++; }
+    }
+
+    printf("MST weight (GPU)  : %lld\n", (long long)h_MST_Weight);
+    printf("MST weight (check): %lld %s\n", check_weight,
+           check_weight == (long long)h_MST_Weight ? "(match)" : "(MISMATCH)");
+    printf("MST edges         : %d\n", mst_edges);
+    printf("Time              : %.6f s\n", secs);
+    printf("Throughput        : %.2f Medges/s\n", G.edges / secs / 1e6);
+
+    delete[] h_MST;
+    freeECLgraph(G);
+    return 0;
+}
 
