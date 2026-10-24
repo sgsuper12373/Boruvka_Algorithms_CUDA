@@ -163,7 +163,10 @@ __global__ void cheapest_find_kernel( int* parents, ull* cheapest,bool* isActive
 		}
 
 		// update if it have outgoing edge, else mark inactive 
-		if( has_outgoing ) atomicMin(&cheapest[rep_u], best);
+		// @note OPTIMIZATION: added atomic guard here 
+		if( has_outgoing ) {
+			if( best < cheapest[rep_u]) atomicMin(&cheapest[rep_u], best);
+		}
 		else isActive[u] = false; 
 	}
 
@@ -327,6 +330,8 @@ void GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight, GPUTiming* timing = null
 		cudaMemcpy(d_changed, &h_changed, sizeof(bool), cudaMemcpyHostToDevice); 
 
 		// reset the cheapest array; 
+		// Doubt: Do we really need to reset the d_cheapest? because the cheapest kernel is already assuming the best key
+		// is INF before starting the loop, once it finishes it update the chepease found edge. 
 		cudaMemset(d_cheapest,0xFF,G.nodes*sizeof(ull)); 
 
 		// function for updating the cheapest array. 
