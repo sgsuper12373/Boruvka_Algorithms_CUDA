@@ -238,6 +238,13 @@ __global__ void compress_tree_kernel(int* parents, int N) {
 
 // ========================================================= MST Computation functions ==============================================================================
 
+struct GPUTiming {
+	double device_allocation_seconds = 0.0;
+	double host_to_device_copy_seconds = 0.0;
+	double boruvka_loop_seconds = 0.0;
+	double device_to_host_copy_seconds = 0.0;
+};
+
 /**
  * @brief 
  * 
@@ -245,9 +252,12 @@ __global__ void compress_tree_kernel(int* parents, int N) {
  * @param G ELCgraph containing data on host 
  * @param inMST boolean vector to know if edge is in MST 
  */
-void GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight	){
+void GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight, GPUTiming* timing = nullptr){
+	using clock = chrono::steady_clock;
+	if (timing != nullptr) *timing = GPUTiming{};
 
 	bool* d_MST = NULL; 
+	auto allocation_start = clock::now();
 	cudaMalloc(&d_MST, G.edges*sizeof(bool)); 
 	cudaMemset(d_MST,0,G.edges*sizeof(bool));
 
@@ -269,11 +279,19 @@ void GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight	){
 	cudaMalloc(&d_nlist, G.edges*sizeof(int)); 
 	cudaMalloc(&d_eweight, G.edges*sizeof(int)); 
 	cudaMalloc(&d_isActive, G.nodes*sizeof(bool));
-
+	bool* d_changed = NULL;
+	cudaMalloc(&d_changed, sizeof(bool));
+	if (timing != nullptr) {
+		timing->device_allocation_seconds = chrono::duration<double>(clock::now() - allocation_start).count();
+	}
 	// copy data from ECL_graph G to device pointers
+	auto h2d_start = clock::now();
 	cudaMemcpy(d_nindex,G.nindex,(G.nodes+1)*sizeof(int), cudaMemcpyHostToDevice); 
 	cudaMemcpy(d_nlist, G.nlist, G.edges*sizeof(int), cudaMemcpyHostToDevice); 
 	cudaMemcpy(d_eweight, G.eweight, G.edges*sizeof(int), cudaMemcpyHostToDevice);
+	if (timing != nullptr) {
+		timing->host_to_device_copy_seconds = chrono::duration<double>(clock::now() - h2d_start).count();
+	}
 
 	// Creating compact graph csr graph structure using the ECLgraph struct 
 	ECLgraph d_G; 
@@ -287,8 +305,6 @@ void GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight	){
 	// now data is ready on GPU we can start the MST computation loop, 
 	// varaible to decide when to terminate the algorithsm 
 	bool h_changed = true; 
-	bool* d_changed = NULL; 
-	cudaMalloc(&d_changed, sizeof(bool)); 
 	cudaMemset(d_changed, 1, sizeof(bool)); // set as true before starting of roud, at loop begining set to false again. 
 
 
@@ -299,8 +315,11 @@ void GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight	){
 	cudaMemset(d_isActive,1,G.nodes*sizeof(bool));
 	init_parents_kernel<<<Blocks, TPB>>>(d_parent, G.nodes);
 	CHECK(); 
-	
+	// Initialization is setup, so exclude it from the Boruvka loop timing.
+	cudaDeviceSynchronize();
+	CHECK();
 
+	auto boruvka_start = clock::now();
 	while( h_changed ){
 		
 		// set h_changed and d_changed to false; 
@@ -330,11 +349,18 @@ void GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight	){
 		// get the value of d_changed 
 		cudaMemcpy(&h_changed, d_changed, sizeof(bool),cudaMemcpyDeviceToHost);
 	}
+	if (timing != nullptr) {
+		timing->boruvka_loop_seconds = chrono::duration<double>(clock::now() - boruvka_start).count();
+	}
 	
 
 	// copy results back to host 
+	auto d2h_start = clock::now();
 	cudaMemcpy( h_MST, d_MST, G.edges*sizeof(bool), cudaMemcpyDeviceToHost );
 	cudaMemcpy( h_MST_Weight, d_MST_Weight, sizeof(ull), cudaMemcpyDeviceToHost );
+	if (timing != nullptr) {
+		timing->device_to_host_copy_seconds = chrono::duration<double>(clock::now() - d2h_start).count();
+	}
 
 	CHECK(); 
 	
@@ -402,13 +428,11 @@ int main(int argc, char* argv[]) {
 
     bool* h_MST = new bool[G.edges];
     ull   h_MST_Weight = 0;
+    GPUTiming timing;
 
     cudaFree(0);   // create the CUDA context now so it isn't counted in the timing
 
-    auto start = chrono::high_resolution_clock::now();
-    GPU_MST(G, h_MST, &h_MST_Weight);
-    auto end = chrono::high_resolution_clock::now();
-    double secs = chrono::duration<double>(end - start).count();
+    GPU_MST(G, h_MST, &h_MST_Weight, &timing);
 
     // Host-side cross-check: recompute weight and edge count from h_MST
     long long check_weight = 0;
@@ -421,8 +445,14 @@ int main(int argc, char* argv[]) {
     printf("MST weight (check): %lld %s\n", check_weight,
            check_weight == (long long)h_MST_Weight ? "(match)" : "(MISMATCH)");
     printf("MST edges         : %d\n", mst_edges);
-    printf("Time              : %.6f s\n", secs);
-    printf("Throughput        : %.2f Medges/s\n", G.edges / secs / 1e6);
+    printf("Device allocation/setup: %.6f s\n", timing.device_allocation_seconds);
+    printf("Host -> device    : %.6f s\n", timing.host_to_device_copy_seconds);
+    printf("Boruvka loop      : %.6f s\n", timing.boruvka_loop_seconds);
+    printf("Device -> host     : %.6f s\n", timing.device_to_host_copy_seconds);
+    printf("Throughput        : %.2f Medges/s\n",
+           timing.boruvka_loop_seconds > 0.0
+               ? G.edges / timing.boruvka_loop_seconds / 1e6
+               : 0.0);
 
     delete[] h_MST;
     freeECLgraph(G);
