@@ -280,7 +280,7 @@ __global__ void compress_tree_kernel(int* parents, int N) {
  * @return time of the Boruvka loop in seconds (used for throughput),
  *         per-kernel / memcpy timing is taken from nsys (see scripts/run_gpu_mst.sbatch)
  */
-double GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight){
+double GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight, int TPB){
 
 	bool* d_MST = NULL;
 	cudaMalloc(&d_MST, G.edges*sizeof(bool)); 
@@ -329,7 +329,7 @@ double GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight){
 
 	// some basic kernels to initialize the d_parent, d_isactive and d_cheapest array
 	// parent array, d_isActive initialization is just one time. but d_cheapest needs to reset after every round its done using the cudaMemset
-	int TPB = 256; 
+	TPB = 256; 
 	int Blocks = (G.nodes + TPB - 1 ) / TPB; 
 	cudaMemset(d_isActive,1,G.nodes*sizeof(bool));
 	init_parents_kernel<<<Blocks, TPB>>>(d_parent, G.nodes);
@@ -488,10 +488,33 @@ void assign_random_weights(ECLgraph& G, int max_weight, uint32_t seed) {
     }
 }
 
+
+void print_usage(){
+	fprintf(stderr, "Usage: ./executable <input.egr>\n" );
+	fprintf(stderr, "Other argument options available: \n"); 
+	fprintf(stderr, "\t --TPB <Threads per block> "); 
+
+}
+
+
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <input.egr>\n", argv[0]);
-        return -1;
+    if (argc < 2) {
+        print_usage(); 
+    }
+
+	int TPB ;;
+    for (int i = 2; i < argc; i++) {
+        string arg = argv[i];
+        if (arg == "--TPB" && i + 1 < argc) {
+            TPB = atoi(argv[++i]);
+			if( TPB <= 0 ){
+				fprintf(stderr, "ERROR: Thrads in block should be +ve number"); 
+			}
+        } else {
+            cerr << "Unknown or misplaced argument: " << arg << "\n";
+            print_usage();
+            return 1;
+        }
     }
 
     ECLgraph G = readECLgraph(argv[1]);
@@ -505,7 +528,7 @@ int main(int argc, char* argv[]) {
     bool* h_MST = new bool[G.edges];
     ull   h_MST_Weight = 0;
 
-    double boruvka_loop_seconds = GPU_MST(G, h_MST, &h_MST_Weight);
+    double boruvka_loop_seconds = GPU_MST(G, h_MST, &h_MST_Weight, TPB);
 
     // number of MST edges marked by the GPU
     int mst_edges = 0;

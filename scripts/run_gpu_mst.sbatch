@@ -1,7 +1,8 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# Runs the CUDA Boruvka MST (v1) on every .egr graph in Graphs/egr_graphs and
-# writes an Nsight Systems (nsys) report per graph.
+# Runs the CUDA Boruvka MST (v1) on the graphs listed in "Graph selection"
+# below (files in Graphs/egr_graphs) and writes an Nsight Systems (nsys)
+# report per graph.
 #
 # For each graph:
 #   1. plain run      -> correctness check + chrono timings (no profiler overhead)
@@ -18,10 +19,10 @@
 # The binary is compiled on the LOGIN node (compute-node compilation is broken
 # for now). Compile WITHOUT -DDEBUG for timing runs (DEBUG syncs after every
 # kernel), e.g.:
-#   nvcc -O3 -arch=sm_XX -Isrc src/Boruvka_intermediate_cuda.cu -o bin/mst
+#   nvcc -O3 -arch=sm_90 -Isrc src/Boruvka_intermediate_cuda.cu -o bin/mst
 #
 # Submit from the project root (so logs/ resolves correctly):
-#   cd ~/BTP_2026/Boruvka_Algorithms_CUDA
+#   cd ~/BTP_2026_CUDA/Boruvka_Algorithms_CUDA
 #   mkdir -p logs
 #   sbatch scripts/run_gpu_mst.sbatch
 # ---------------------------------------------------------------------------
@@ -79,25 +80,36 @@ mkdir -p "$REPORT_DIR"
 echo "Reports -> $REPORT_DIR"
 
 # ---- Graph selection ------------------------------------------------------
-# All graphs:
-shopt -s nullglob
-graphs=("$GRAPH_DIR"/*.egr)
-shopt -u nullglob
-
-# Selected graphs (bare names, resolved against GRAPH_DIR below):
-# graphs=( "amazon0601.egr" "in-2004.egr" "rmat16.sym.egr" "USA-road-d.NY.egr" "internet.egr" )
+# One graph per line, file name inside GRAPH_DIR. Put # in front to skip one.
+graphs=(
+    "2d-2e20.sym.egr"
+    "amazon0601.egr"
+    "as-skitter.egr"
+    "citationCiteseer.egr"
+    "cit-Patents.egr"
+    "coPapersDBLP.egr"
+    "delaunay_n24.egr"
+    "europe_osm.egr"
+    "in-2004.egr"
+    "internet.egr"
+    "r4-2e23.sym.egr"
+    "rmat16.sym.egr"
+    "rmat22.sym.egr"
+    "soc-LiveJournal1.egr"
+    "USA-road-d.NY.egr"
+    "USA-road-d.USA.egr"
+)
 
 if [[ ${#graphs[@]} -eq 0 ]]; then
-    echo "ERROR: no .egr graphs found in $GRAPH_DIR" >&2
+    echo "ERROR: graph list is empty" >&2
     exit 1
 fi
-echo "Found ${#graphs[@]} graphs"
+echo "Running ${#graphs[@]} graphs"
 
 # ---- Run ------------------------------------------------------------------
 for g in "${graphs[@]}"; do
     name="$(basename "$g" .egr)"
-    # Works for both bare names (selected list) and full paths (glob).
-    if [[ "$g" == /* ]]; then file="$g"; else file="$GRAPH_DIR/$g"; fi
+    file="$GRAPH_DIR/$g"
 
     echo ""
     echo "=================================================="
