@@ -34,17 +34,46 @@ static void CheckCuda(const int line)
 
 
 
+// ====================================================== HOST (CPU reference) Functions ======================================================
+// Same DSU as DSU_half_cpu in Summer_Prjoect_2026/Boruvika_algo/src/DSU_datastructures.hpp
+
 /**
- * @brief This methods will find the parent of node v
- * 		  not read only implementation, path contration will be done here 
- * 		  just adding for weight verification. 
- * @todo implement host_find for cpu verification. 
- * @param parents 
- * @param v 
- * @return __host__ 
+ * @brief This methods will find the representative (root) of node v
+ * 		  does the half path compression: every node on the path points to its grandparent
+ * 		  used only for the CPU verification (serial_half).
+ * @param parents
+ * @param v
+ * @return __host__
  */
-__host__ int host_find( const vector<int>& parents, const int v ){
-	return 0; 
+__host__ int host_find( vector<int>& parents, int v ){
+	while( parents[v] != v ){
+		parents[v] = parents[parents[v]];
+		v = parents[v];
+	}
+	return v;
+}
+
+/**
+ * @brief union by size, smaller component is attached under the bigger one
+ * 		  return false if u and v are already in the same component
+ * @param parents
+ * @param size
+ * @param u
+ * @param v
+ * @return __host__
+ */
+__host__ bool host_union( vector<int>& parents, vector<int>& size, int u, int v ){
+	int ult_u = host_find(parents, u);
+	int ult_v = host_find(parents, v);
+
+	// if in same comp return false;
+	if( ult_u == ult_v ) return false;
+
+	if( size[ult_u] > size[ult_v] ) swap(ult_u, ult_v);
+
+	parents[ult_u] = ult_v;
+	size[ult_v] += size[ult_u];
+	return true;
 }
 
 
@@ -137,7 +166,7 @@ __global__ void init_parents_kernel( int *parents, int N ){
 __global__ void cheapest_find_kernel( int* parents, ull* cheapest,bool* isActive, ECLgraph G ){
 
 
-	// u is basicall tid
+	// u is basically tid
 	int u = threadIdx.x + blockDim.x * blockIdx.x; 
 	
 	// size of parents array will always equal to G.nodes
@@ -364,6 +393,69 @@ double GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight){
 
 
 /**
+ * @brief CPU reference MST, port of serial_half (Boruvka_CPU<DSU_half_cpu>) from
+ * 		  Summer_Prjoect_2026/Boruvika_algo/src/ECL_boruvkas.cpp
+ * 		  used to verify the MST weight computed on the GPU.
+ * @param G ELCgraph containing data on host
+ * @param mst_edges number of edges added to the MST (nodes - components)
+ * @return MST weight
+ */
+long long CPU_MST_serial_half(ECLgraph G, int* mst_edges){
+	vector<int> parents(G.nodes), size(G.nodes, 1);
+	iota(parents.begin(), parents.end(), 0);
+
+	long long MST_Weight = 0;
+	int prev_comps = INT_MAX;
+	int curr_comps = G.nodes;
+
+	vector<int> comp(G.nodes);     // comp[u] = component id of node u
+	vector<int> cheapest(G.nodes); // cheapest[c] = edge index of comp c's cheapest outgoing edge
+
+	while( prev_comps != curr_comps ){
+		prev_comps = curr_comps;
+
+		// PHASE_0: flatten component ids once and reset cheapest
+		for( int u = 0 ; u < G.nodes; u++ ){
+			comp[u] = host_find(parents, u);
+			cheapest[u] = INT_MAX;
+		}
+
+		// PHASE_1: find the cheapest outgoing edge per component
+		for( int u = 0 ; u < G.nodes; u++ ){
+			int ult_u = comp[u];
+			for( int i = G.nindex[u]; i < G.nindex[u+1]; i++ ){
+				int v = G.nlist[i];
+				int w = G.eweight[i];
+
+				if( ult_u == comp[v] ) continue; // same comp, skip
+
+				if( cheapest[ult_u] == INT_MAX || w < G.eweight[ cheapest[ult_u] ] ){
+					cheapest[ult_u] = i;
+				}
+			}
+		}
+
+		// PHASE_2: merge comps
+		for( int u = 0 ; u < G.nodes; u++ ){
+			if( cheapest[u] == INT_MAX ) continue;
+
+			int i = cheapest[u];
+			int v = G.nlist[i];
+			int w = G.eweight[i];
+
+			if( host_union(parents, size, u, v) ){
+				MST_Weight += w;
+				curr_comps--;
+			}
+		}
+	}
+
+	*mst_edges = G.nodes - curr_comps;
+	return MST_Weight;
+}
+
+
+/**
  * @brief Same logic as ECL_boruvkas.cpp: one random weight per undirected edge
  *        (u <= v), mirrored to the reverse CSR entry v -> u.
  */
@@ -415,17 +507,23 @@ int main(int argc, char* argv[]) {
 
     double boruvka_loop_seconds = GPU_MST(G, h_MST, &h_MST_Weight);
 
-    // Host-side cross-check: recompute weight and edge count from h_MST
-    long long check_weight = 0;
+    // number of MST edges marked by the GPU
     int mst_edges = 0;
     for (int i = 0; i < G.edges; i++) {
-        if (h_MST[i]) { check_weight += G.eweight[i]; mst_edges++; }
+        if (h_MST[i]) mst_edges++;
     }
 
+    // CPU reference (serial_half) for verification
+    int cpu_mst_edges = 0;
+    auto cpu_start = chrono::steady_clock::now();
+    long long cpu_weight = CPU_MST_serial_half(G, &cpu_mst_edges);
+    double cpu_seconds = chrono::duration<double>(chrono::steady_clock::now() - cpu_start).count();
+
     printf("MST weight (GPU)  : %lld\n", (long long)h_MST_Weight);
-    printf("MST weight (check): %lld %s\n", check_weight,
-           check_weight == (long long)h_MST_Weight ? "(match)" : "(MISMATCH)");
-    printf("MST edges         : %d\n", mst_edges);
+    printf("MST weight (CPU)  : %lld %s\n", cpu_weight, cpu_weight == (long long)h_MST_Weight ? "(match)" : "(MISMATCH)");
+    printf("MST edges (GPU)   : %d\n", mst_edges);
+    printf("MST edges (CPU)   : %d %s\n", cpu_mst_edges, cpu_mst_edges == mst_edges ? "(match)" : "(MISMATCH)");
+    printf("CPU serial_half   : %.6f s\n", cpu_seconds);
     printf("Boruvka loop      : %.6f s\n", boruvka_loop_seconds);
     printf("Throughput        : %.2f Medges/s\n",boruvka_loop_seconds > 0.0? G.edges / boruvka_loop_seconds / 1e6: 0.0);
 

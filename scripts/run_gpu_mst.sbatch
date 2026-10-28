@@ -1,12 +1,7 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# Runs the CUDA Boruvka MST (v1) on the graphs listed in "Graph selection"
-# below (files in graphs/ inside the project folder) and writes an Nsight
-# Systems (nsys) report per graph.
-#
-# Layout:
-#   ~/BTP_2026_CUDA/Boruvka_Algorithms_CUDA/
-#       bin/mst  graphs/*.egr  logs/  reports/  scripts/  src/
+# Runs the CUDA Boruvka MST (v1) on every .egr graph in Graphs/egr_graphs and
+# writes an Nsight Systems (nsys) report per graph.
 #
 # For each graph:
 #   1. plain run      -> correctness check + chrono timings (no profiler overhead)
@@ -26,11 +21,9 @@
 #   nvcc -O3 -arch=sm_XX -Isrc src/Boruvka_intermediate_cuda.cu -o bin/mst
 #
 # Submit from the project root (so logs/ resolves correctly):
-#   cd ~/BTP_2026_CUDA/Boruvka_Algorithms_CUDA
+#   cd ~/BTP_2026/Boruvka_Algorithms_CUDA
 #   mkdir -p logs
 #   sbatch scripts/run_gpu_mst.sbatch
-#
-# Graphs from somewhere else: GRAPH_DIR=/path/to/graphs sbatch scripts/run_gpu_mst.sbatch
 # ---------------------------------------------------------------------------
 
 #SBATCH --job-name=boruvka_cuda
@@ -40,7 +33,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G                  # host RAM: big graphs + random-weight generation
-#SBATCH --time=05:00:00            # all graphs, each run twice (plain + nsys)
+#SBATCH --time=03:00:00            # all graphs, each run twice (plain + nsys)
 #SBATCH --output=logs/%x_%j.out    # logs/ must exist BEFORE sbatch (SLURM won't create it)
 #SBATCH --error=logs/%x_%j.err
 
@@ -49,7 +42,7 @@ set -euo pipefail
 # ---- Paths ----------------------------------------------------------------
 BTP_DIR="$HOME/BTP_2026_CUDA"
 PROJECT_DIR="$BTP_DIR/Boruvka_Algorithms_CUDA"
-GRAPH_DIR="${GRAPH_DIR:-$PROJECT_DIR/graphs}"
+GRAPH_DIR="$BTP_DIR/Graphs/egr_graphs"
 
 BIN="$PROJECT_DIR/bin/mst"
 REPORT_DIR="$PROJECT_DIR/reports/${SLURM_JOB_ID:-manual_$(date +%Y%m%d_%H%M%S)}"
@@ -86,36 +79,25 @@ mkdir -p "$REPORT_DIR"
 echo "Reports -> $REPORT_DIR"
 
 # ---- Graph selection ------------------------------------------------------
-# One graph per line, file name inside GRAPH_DIR. Put # in front to skip one.
-graphs=(
-    "2d-2e20.sym.egr"
-    "amazon0601.egr"
-    "as-skitter.egr"
-    "citationCiteseer.egr"
-    "cit-Patents.egr"
-    "coPapersDBLP.egr"
-    "delaunay_n24.egr"
-    "europe_osm.egr"
-    "in-2004.egr"
-    "internet.egr"
-    "r4-2e23.sym.egr"
-    "rmat16.sym.egr"
-    "rmat22.sym.egr"
-    "soc-LiveJournal1.egr"
-    "USA-road-d.NY.egr"
-    "USA-road-d.USA.egr"
-)
+# All graphs:
+shopt -s nullglob
+graphs=("$GRAPH_DIR"/*.egr)
+shopt -u nullglob
+
+# Selected graphs (bare names, resolved against GRAPH_DIR below):
+# graphs=( "amazon0601.egr" "in-2004.egr" "rmat16.sym.egr" "USA-road-d.NY.egr" "internet.egr" )
 
 if [[ ${#graphs[@]} -eq 0 ]]; then
-    echo "ERROR: graph list is empty" >&2
+    echo "ERROR: no .egr graphs found in $GRAPH_DIR" >&2
     exit 1
 fi
-echo "Running ${#graphs[@]} graphs"
+echo "Found ${#graphs[@]} graphs"
 
 # ---- Run ------------------------------------------------------------------
 for g in "${graphs[@]}"; do
     name="$(basename "$g" .egr)"
-    file="$GRAPH_DIR/$g"
+    # Works for both bare names (selected list) and full paths (glob).
+    if [[ "$g" == /* ]]; then file="$g"; else file="$GRAPH_DIR/$g"; fi
 
     echo ""
     echo "=================================================="
