@@ -9,16 +9,24 @@
 ## For CUDA 
 - Confirm the cuda code is correct for all the inputs, 
 - compare the throughput compared the the openMP best throughput
-- OPTIMZATIONS: 
+- OPTIMZATIONS:  
     - use warp level and block level and hybrid mode 
     - avoid atomics to global memory by all threads ( only representative of group update the global memory (warp,block))
     - figure out if it's useful to exploit shared memory
-    - compute time for each kernels and see which is taking most part of the overall time.
+    - compute time for each kernels and see which is taking most part of the overall time. // used nsysn 
 
 
 
 # What results we want for comparision with UMINHO and My Boruvika
-- 1 2 4 8 16, 24 on single NUMA node with hyper threading disabled, 
+- 1 2 4 8 16, 24 on single NUMA node with hyper threading disabled
 - 1 2 4 8 16 24 32 48 on single NUMA node with hyperthreading enabled
 - Both NUMA node with 1 2 4 8 16 24 32 48 threads 
 - Both NUMA nodes with with hyperthreading and 1 2 4 8 16 24 32 48 64 80 96
+
+
+# 28-10-2026
+- Warp and block optimzation
+- 9 runs with median and other comparision 
+- time the same thing as ecl-mst
+- avoid atomics to global memory by all threads ( only representative of group update the global memory (warp,block))
+- galois if possible 

@@ -35,7 +35,6 @@ static void CheckCuda(const int line)
 
 
 // ====================================================== HOST (CPU reference) Functions ======================================================
-// Same DSU as DSU_half_cpu in Summer_Prjoect_2026/Boruvika_algo/src/DSU_datastructures.hpp
 
 /**
  * @brief This methods will find the representative (root) of node v
@@ -329,7 +328,6 @@ double GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight, int TPB){
 
 	// some basic kernels to initialize the d_parent, d_isactive and d_cheapest array
 	// parent array, d_isActive initialization is just one time. but d_cheapest needs to reset after every round its done using the cudaMemset
-	TPB = 256; 
 	int Blocks = (G.nodes + TPB - 1 ) / TPB; 
 	cudaMemset(d_isActive,1,G.nodes*sizeof(bool));
 	init_parents_kernel<<<Blocks, TPB>>>(d_parent, G.nodes);
@@ -492,23 +490,25 @@ void assign_random_weights(ECLgraph& G, int max_weight, uint32_t seed) {
 void print_usage(){
 	fprintf(stderr, "Usage: ./executable <input.egr>\n" );
 	fprintf(stderr, "Other argument options available: \n"); 
-	fprintf(stderr, "\t --TPB <Threads per block> "); 
+	fprintf(stderr, "\t --TPB <Threads per block>   (1 to 1024, default 256)\n");
 
 }
 
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        print_usage(); 
+        print_usage();
+        return 1;
     }
 
-	int TPB ;;
+	int TPB = 256;   // default threads per block
     for (int i = 2; i < argc; i++) {
         string arg = argv[i];
         if (arg == "--TPB" && i + 1 < argc) {
             TPB = atoi(argv[++i]);
-			if( TPB <= 0 ){
-				fprintf(stderr, "ERROR: Thrads in block should be +ve number"); 
+			if( TPB <= 0 || TPB > 1024 ){
+				fprintf(stderr, "ERROR: Threads per block should be between 1 and 1024\n");
+				return 1;
 			}
         } else {
             cerr << "Unknown or misplaced argument: " << arg << "\n";
@@ -519,6 +519,7 @@ int main(int argc, char* argv[]) {
 
     ECLgraph G = readECLgraph(argv[1]);
     printf("Graph: %s\nNodes: %d\nEdges: %d\n", argv[1], G.nodes, G.edges);
+    printf("Threads per block : %d\n", TPB);
 
     if (G.eweight == NULL) {
         assign_random_weights(G, MAX_WEIGHT, WEIGHT_SEED);
