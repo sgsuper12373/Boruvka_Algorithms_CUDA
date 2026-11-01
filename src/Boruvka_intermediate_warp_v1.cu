@@ -149,56 +149,66 @@ __global__ void init_parents_kernel( int *parents, int N ){
 }
 
 /**
- * @brief 
- * Find the cheapest outgoing edge from each component and store it's edge index in cheapest[comp]; 
- *	assign the thread per vertex u, each thread will find it's parent and then travese the corresponding edge list for d_nlist 
- *	in each neighbour v in d_nlist find it's parent, 
- *	if parent(u) == parent(v) then they are in same component, skip this entry 
- *	else check if there already exist some cheapest edge (might get updated by the other threads
- *	if current edge is cheaper than existing edge in d_cheapest the update it usign atomicMin
- * 
+ * @brief Find the cheapest outgoing edge from each component, ONE WARP PER VERTEX.
+ *
+ * 	Why: with one thread per vertex, a thread with a degree-2000 vertex loops 2000 times
+ * 	while its warp neighbour with a degree-2 vertex sits idle (thread divergence / load imbalance).
+ * 	Here the 32 lanes of a warp share the edges of one vertex u:
+ *
+ * 		lane 0 : edges start+0, start+32, start+64, ...
+ * 		lane 1 : edges start+1, start+33, start+65, ...
+ * 		...
+ * 		lane 31: edges start+31, start+63, ...
+ *
+ * 	1. warp number = u, lane = position of the thread inside the warp
+ * 	2. every lane keeps the cheapest outgoing edge (encoded key) among the edges it looked at
+ * 	3. warp min reduction with __shfl_down_sync, after it lane 0 holds the min of all 32 lanes
+ * 	   (all 32 lanes work on the same vertex, hence the same component, so a plain reduction is correct)
+ * 	4. lane 0 marks u inactive if no outgoing edge is left, else updates cheapest[rep_u] with atomicMin
+ *
+ * @note needs blockDim.x to be a multiple of 32, so a warp never spans two blocks / two vertices
+ * 	     and the full mask 0xffffffff is valid in the shuffle.
  * @param parents 
  * @param cheapest 
+ * @param isActive 
  * @param G 
  * @return __global__ 
  */
-__global__ void cheapest_find_kernel( int* parents, ull* cheapest,bool* isActive, ECLgraph G ){
+__global__ void cheapest_find_kernel( int* parents, ull* cheapest, bool* isActive, ECLgraph G ){
 
+	// one warp per vertex: warp number = vertex, lane = position inside the warp
+	// long long: nodes * 32 threads can get close to the int limit (europe_osm: 1.63 billion)
+	long long gid = threadIdx.x + (long long)blockDim.x * blockIdx.x;
+	int u    = (int)(gid / 32);
+	int lane = threadIdx.x % 32;
 
-	// u is basically tid
-	int u = threadIdx.x + blockDim.x * blockIdx.x; 
-	
-	// size of parents array will always equal to G.nodes
-	// continue only if the vertex is active. 
-	if( u < G.nodes && isActive[u]){
-		int rep_u, v, rep_v;  					// store the representatives of u and v
-		rep_u = device_find(parents, u); 	// find the representative of u
-		ull best, key; 
-		best = INF; 					// initial best outgoing edge, compute locally then update globally 
-		bool has_outgoing = false;  		// If this vertex have no outgoing edge mark it inactive so next time we we can skip it. 
+	// all 32 lanes of a warp have the same u, so the whole warp leaves together
+	if( u >= G.nodes || !isActive[u] ) return;
 
+	int rep_u = device_find(parents, u);
 
-		// traverse the edge list, and update the cheapest edge array 
-		for( int i = G.nindex[u] ; i < G.nindex[u+1]; i++ ){
-			v = G.nlist[i]; 
-			rep_v = device_find(parents, v); 
-			if( rep_u == rep_v ) continue; 
-			has_outgoing = true; 
+	// each lane looks at every 32nd edge of u and keeps its local cheapest edge
+	ull best = INF;
+	for( int i = G.nindex[u] + lane; i < G.nindex[u+1]; i += 32 ){
+		int rep_v = device_find(parents, G.nlist[i]);
+		if( rep_u == rep_v ) continue;		// same component, not an outgoing edge
 
-			key = edgeKey(G.eweight[i], i ); 
-			best = best < key ? best : key;  // update the local cheapest edge. 
-
-		}
-
-		// update if it have outgoing edge, else mark inactive 
-		// @note OPTIMIZATION: added atomic guard here 
-		if( has_outgoing ) {
-			if( best < cheapest[rep_u]) atomicMin(&cheapest[rep_u], best);
-		}
-		// if( has_outgoing) atomicMin(&cheapest[rep_u], best);
-		else isActive[u] = false; 
+		ull key = edgeKey(G.eweight[i], i );
+		best = best < key ? best : key;
 	}
 
+	// warp min reduction: offsets 16, 8, 4, 2, 1
+	// in every step lane k takes the value of lane k+offset, after the last step lane 0 has the min of the warp
+	for( int offset = 16; offset > 0; offset /= 2 ){
+		ull other = __shfl_down_sync(0xffffffff, best, offset);
+		best = best < other ? best : other;
+	}
+
+	// only lane 0 writes, so one global atomic per vertex
+	if( lane == 0 ){
+		if( best == INF ) isActive[u] = false;		// no outgoing edge left, skip u in next rounds
+		else if( best < cheapest[rep_u] ) atomicMin(&cheapest[rep_u], best);	// check first, atomic only if it can win
+	}
 }
 
 
@@ -329,13 +339,17 @@ double GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight, int TPB){
 	// some basic kernels to initialize the d_parent, d_isactive and d_cheapest array
 	// parent array, d_isActive initialization is just one time. but d_cheapest needs to reset after every round its done using the cudaMemset
 	int Blocks = (G.nodes + TPB - 1 ) / TPB; 
+	// cheapest_find_kernel uses one warp (32 threads) per vertex, so it needs 32x more threads
+	int findBlocks = (int)(((long long)G.nodes * 32 + TPB - 1) / TPB);
 	cudaMemset(d_isActive,1,G.nodes*sizeof(bool));
+
+	// Starting time when Actual computation starts 
+	auto boruvka_start = chrono::steady_clock::now();
 	init_parents_kernel<<<Blocks, TPB>>>(d_parent, G.nodes);
 	CHECK();
 
 	// memset + init kernel are async, finish them so they are not counted in the loop time
 	cudaDeviceSynchronize();
-	auto boruvka_start = chrono::steady_clock::now();
 	while( h_changed ){
 
 		// set h_changed and d_changed to false;
@@ -346,8 +360,8 @@ double GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight, int TPB){
 		cudaMemset(d_cheapest,0xFF,G.nodes*sizeof(ull));
 
 		// function for updating the cheapest array.
-		// same config as init Parents works here (vertex centric) we have thread per vertex
-		cheapest_find_kernel<<<Blocks, TPB>>>(d_parent,d_cheapest, d_isActive,d_G);
+		// warp per vertex: findBlocks launches 32 threads for every vertex
+		cheapest_find_kernel<<<findBlocks, TPB>>>(d_parent,d_cheapest, d_isActive,d_G);
 		CHECK();
 
 
@@ -490,7 +504,7 @@ void assign_random_weights(ECLgraph& G, int max_weight, uint32_t seed) {
 void print_usage(){
 	fprintf(stderr, "Usage: ./executable <input.egr>\n" );
 	fprintf(stderr, "Other argument options available: \n"); 
-	fprintf(stderr, "\t --TPB <Threads per block>   (1 to 1024, default 256)\n");
+	fprintf(stderr, "\t --TPB <Threads per block>   (multiple of 32, 32 to 1024, default 256)\n");
 
 }
 
@@ -506,8 +520,9 @@ int main(int argc, char* argv[]) {
         string arg = argv[i];
         if (arg == "--TPB" && i + 1 < argc) {
             TPB = atoi(argv[++i]);
-			if( TPB <= 0 || TPB > 1024 ){
-				fprintf(stderr, "ERROR: Threads per block should be between 1 and 1024\n");
+			// multiple of 32: cheapest_find_kernel gives one full warp to each vertex
+			if( TPB <= 0 || TPB > 1024 || TPB % 32 != 0 ){
+				fprintf(stderr, "ERROR: Threads per block should be a multiple of 32 between 32 and 1024\n");
 				return 1;
 			}
         } else {

@@ -30,7 +30,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G                  # host RAM: big graphs + ECL's CPU (Kruskal) check
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00            # RUNS runs per graph, each with ECL's CPU check
 #SBATCH --output=logs/%x_%j.out    # logs/ must exist BEFORE sbatch (SLURM won't create it)
 #SBATCH --error=logs/%x_%j.err
 
@@ -42,7 +42,7 @@ PROJECT_DIR="$BTP_DIR/Boruvka_Algorithms_CUDA"
 GRAPH_DIR="$BTP_DIR/Graphs/egr_graphs"
 
 BIN="$PROJECT_DIR/bin/ecl_mst"
-RUNS=1                             # runs per graph, report the median later
+RUNS=9                             # runs per graph, report the median later
 REPORT_DIR="$PROJECT_DIR/reports/ecl_${SLURM_JOB_ID:-manual_$(date +%Y%m%d_%H%M%S)}"
 CSV="$REPORT_DIR/ecl_throughput.csv"
 

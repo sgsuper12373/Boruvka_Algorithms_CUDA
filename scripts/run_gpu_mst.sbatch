@@ -5,12 +5,18 @@
 # report per graph.
 #
 # For each graph:
-#   1. plain run      -> correctness check + chrono timings (no profiler overhead)
-#   2. nsys run       -> <graph>.nsys-rep (open in the Nsight Systems GUI)
-#   3. nsys stats     -> per-kernel / memcpy / memset / API times as CSV
+#   1. RUNS plain runs -> correctness check + chrono timings (no profiler overhead),
+#                         one CSV row per run (take the median later)
+#   2. nsys run        -> <graph>.nsys-rep (open in the Nsight Systems GUI), once per graph
+#   3. nsys stats      -> per-kernel / memcpy / memset / API times as CSV
 #
-# Output: reports/<job_id>/<graph>/
-#   <graph>.txt                          program output of the plain run
+# "Boruvka loop" time excludes the host<->device copies, like ECL-MST's "Dev" time.
+#   throughput (Medges/s) = edges / loop time / 1e6
+#
+# Output: reports/<job_id>/
+#   boruvka_runs.csv                     one row per graph per run
+# and reports/<job_id>/<graph>/
+#   run<k>.txt                           program output of plain run k
 #   <graph>.nsys-rep                     full timeline
 #   <graph>_cuda_gpu_kern_sum.csv        time per kernel (summed over all rounds)
 #   <graph>_cuda_gpu_mem_time_sum.csv    memcpy H2D/D2H + memset times
@@ -34,7 +40,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G                  # host RAM: big graphs + random-weight generation
-#SBATCH --time=03:00:00            # all graphs, each run twice (plain + nsys)
+#SBATCH --time=06:00:00            # all graphs, RUNS plain runs + 1 nsys run each
 #SBATCH --output=logs/%x_%j.out    # logs/ must exist BEFORE sbatch (SLURM won't create it)
 #SBATCH --error=logs/%x_%j.err
 
@@ -46,7 +52,9 @@ PROJECT_DIR="$BTP_DIR/Boruvka_Algorithms_CUDA"
 GRAPH_DIR="$BTP_DIR/Graphs/egr_graphs"
 
 BIN="$PROJECT_DIR/bin/mst"
+RUNS=9                             # plain runs per graph, report the median later
 REPORT_DIR="$PROJECT_DIR/reports/${SLURM_JOB_ID:-manual_$(date +%Y%m%d_%H%M%S)}"
+CSV="$REPORT_DIR/boruvka_runs.csv"
 
 # ---- Environment ----------------------------------------------------------
 module purge
@@ -62,6 +70,8 @@ if [[ ! -x "$BIN" ]]; then
     exit 1
 fi
 echo "Using $BIN (built $(date -r "$BIN"))"
+# which build produced this report: binary name + build time (no commas, it goes in the CSV)
+BINARY_TAG="$(basename "$BIN")@$(date -r "$BIN" +%Y%m%d_%H%M%S)"
 
 # nsys ships with the CUDA toolkit; override with NSYS=/path/to/nsys if needed.
 NSYS="${NSYS:-$(command -v nsys || true)}"
@@ -104,7 +114,9 @@ if [[ ${#graphs[@]} -eq 0 ]]; then
     echo "ERROR: graph list is empty" >&2
     exit 1
 fi
-echo "Running ${#graphs[@]} graphs"
+echo "Running ${#graphs[@]} graphs, $RUNS runs each"
+
+echo "graph,nodes,edges,run,binary,loop_seconds,throughput_medges_s,verify" > "$CSV"
 
 # ---- Run ------------------------------------------------------------------
 for g in "${graphs[@]}"; do
@@ -121,13 +133,45 @@ for g in "${graphs[@]}"; do
         continue
     fi
 
+    # .egr header = two 32-bit ints: nodes, edges
+    read -r nodes edges < <(od -An -t d4 -N 8 "$file")
+    echo "Nodes: $nodes  Edges: $edges"
+
     out="$REPORT_DIR/$name"
     mkdir -p "$out"
 
-    # 1. Plain run: correctness + chrono timings without profiler overhead.
-    #    Keep going if one graph fails (e.g. out of GPU memory).
-    if ! "$BIN" "$file" 2>&1 | tee "$out/$name.txt"; then
-        echo "!!! FAILED on $name, skipping nsys"
+    # 1. Plain runs: correctness + chrono timings without profiler overhead.
+    #    Keep going if one run fails (e.g. out of GPU memory).
+    ok_runs=0
+    for run in $(seq 1 "$RUNS"); do
+        run_out="$out/run$run.txt"
+
+        if ! "$BIN" "$file" > "$run_out" 2>&1; then
+            echo "!!! run $run FAILED on $name (see $run_out)"
+            continue
+        fi
+
+        # e.g. "Boruvka loop      : 0.001807 s"
+        secs="$(grep -m1 '^Boruvka loop' "$run_out" | awk '{print $4}' || true)"
+        if [[ -z "$secs" ]]; then
+            echo "!!! run $run: no 'Boruvka loop' time found in $run_out"
+            continue
+        fi
+        tput="$(awk -v e="$edges" -v s="$secs" 'BEGIN { printf "%.2f", (s > 0 ? e / s / 1e6 : 0) }')"
+        # both weight and edge count must match the CPU reference
+        if [[ "$(grep -c '(match)' "$run_out")" -eq 2 ]] && ! grep -q MISMATCH "$run_out"; then
+            verify="ok"
+        else
+            verify="MISMATCH"
+        fi
+
+        echo "$name,$nodes,$edges,$run,$BINARY_TAG,$secs,$tput,$verify" >> "$CSV"
+        printf "run %d: loop %s s  ->  %10s Medges/s  [%s]\n" "$run" "$secs" "$tput" "$verify"
+        ok_runs=$((ok_runs + 1))
+    done
+
+    if [[ $ok_runs -eq 0 ]]; then
+        echo "!!! all runs FAILED on $name, skipping nsys"
         continue
     fi
 
@@ -152,3 +196,6 @@ done
 echo ""
 echo "All graphs done at $(date)"
 echo "Reports in $REPORT_DIR"
+echo "Results in $CSV"
+echo ""
+column -s, -t < "$CSV" || cat "$CSV"
