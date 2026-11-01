@@ -1,7 +1,8 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
 # Runs ECL-MST (reference GPU MST code) on the graphs listed below and records
-# its throughput, for comparison with our Boruvka (run_gpu_mst.sbatch).
+# its throughput, for comparison with our Boruvka versions
+# (run_gpu_mst.sbatch, run_atomic_guard.sbatch, run_warp_mst.sbatch).
 #
 # ECL-MST prints its GPU time as "Dev+: <sec> s" (filtered variant, used when
 # avg degree >= 4) or "Dev-: <sec> s" (non-filtered). That time excludes the
@@ -13,14 +14,16 @@
 #   ecl_throughput.csv        one row per graph per run
 #   <graph>/run<k>.txt        full ECL-MST output of each run
 #
-# Compile on the LOGIN node (H100 = sm_90):
+# Compile on the LOGIN node with the Makefile in the project root:
 #   cd ~/BTP_2026_CUDA/Boruvka_Algorithms_CUDA
-#   nvcc -O3 -arch=sm_90 ../ECL-MST/source/ECL-MST_10.cu -o bin/ecl_mst
+#   module load cuda-12.4 gcc-12.4.0
+#   make bin/ecl_mst
 #
 # Submit from the project root (so logs/ resolves correctly):
 #   cd ~/BTP_2026_CUDA/Boruvka_Algorithms_CUDA
 #   mkdir -p logs
 #   sbatch scripts/run_ecl_mst.sbatch
+#   logs -> logs/ecl_mst_<job_id>.out / .err
 # ---------------------------------------------------------------------------
 
 #SBATCH --job-name=ecl_mst

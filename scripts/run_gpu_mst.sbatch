@@ -1,8 +1,16 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# Runs the CUDA Boruvka MST (v1) on the graphs listed in "Graph selection"
-# below (files in Graphs/egr_graphs) and writes an Nsight Systems (nsys)
-# report per graph.
+# Runs the CUDA Boruvka MST, BASELINE version, on the graphs listed in
+# "Graph selection" below (files in Graphs/egr_graphs) and writes an
+# Nsight Systems (nsys) report per graph.
+#
+#   source     : src/Boruvka_intermediate_cuda.cu
+#   executable : bin/mst
+#   idea       : one thread per vertex, every thread does a plain atomicMin on
+#                cheapest[rep].
+#
+# Other versions: run_gpu_mst.sbatch (baseline), run_atomic_guard.sbatch,
+# run_warp_mst.sbatch. ECL-MST for comparison: run_ecl_mst.sbatch.
 #
 # For each graph:
 #   1. RUNS plain runs -> correctness check + chrono timings (no profiler overhead),
@@ -23,17 +31,20 @@
 #   <graph>_cuda_api_sum.csv             host-side CUDA API times
 #
 # The binary is compiled on the LOGIN node (compute-node compilation is broken
-# for now). Compile WITHOUT -DDEBUG for timing runs (DEBUG syncs after every
-# kernel), e.g.:
-#   nvcc -O3 -arch=sm_90 -Isrc src/Boruvka_intermediate_cuda.cu -o bin/mst
+# for now) with the Makefile in the project root:
+#   cd ~/BTP_2026_CUDA/Boruvka_Algorithms_CUDA
+#   module load cuda-12.4 gcc-12.4.0
+#   make bin/mst
+# Don't add -DDEBUG for timing runs (DEBUG syncs after every kernel).
 #
 # Submit from the project root (so logs/ resolves correctly):
 #   cd ~/BTP_2026_CUDA/Boruvka_Algorithms_CUDA
 #   mkdir -p logs
 #   sbatch scripts/run_gpu_mst.sbatch
+#   logs -> logs/boruvka_base_<job_id>.out / .err
 # ---------------------------------------------------------------------------
 
-#SBATCH --job-name=boruvka_cuda
+#SBATCH --job-name=boruvka_base
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
