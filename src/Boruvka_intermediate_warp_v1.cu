@@ -177,7 +177,7 @@ __global__ void init_parents_kernel( int *parents, int N ){
 __global__ void cheapest_find_kernel( int* parents, ull* cheapest, bool* isActive, ECLgraph G ){
 
 	// one warp per vertex: warp number = vertex, lane = position inside the warp
-	// long long: nodes * 32 threads can get close to the int limit (europe_osm: 1.63 billion)
+	// long long: nodes * 32 threads can get close to the int limit 
 	long long gid = threadIdx.x + (long long)blockDim.x * blockIdx.x;
 	int u    = (int)(gid / 32);
 	int lane = threadIdx.x % 32;
@@ -342,13 +342,16 @@ double GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight, int TPB){
 	// cheapest_find_kernel uses one warp (32 threads) per vertex, so it needs 32x more threads
 	int findBlocks = (int)(((long long)G.nodes * 32 + TPB - 1) / TPB);
 	cudaMemset(d_isActive,1,G.nodes*sizeof(bool));
+	// finish the memset first, it is setup and not part of the timed Boruvka loop
+	cudaDeviceSynchronize();
 
-	// Starting time when Actual computation starts 
+	// Boruvka loop time starts here: init_parents_kernel + every round are counted,
+	// the allocations, H2D copies and the isActive memset above are not
 	auto boruvka_start = chrono::steady_clock::now();
 	init_parents_kernel<<<Blocks, TPB>>>(d_parent, G.nodes);
 	CHECK();
 
-	// memset + init kernel are async, finish them so they are not counted in the loop time
+	// wait for init_parents_kernel before the first round
 	cudaDeviceSynchronize();
 	while( h_changed ){
 

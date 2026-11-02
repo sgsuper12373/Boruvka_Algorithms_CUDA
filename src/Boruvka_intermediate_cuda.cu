@@ -330,14 +330,16 @@ double GPU_MST(ECLgraph G, bool*h_MST, ull* h_MST_Weight, int TPB){
 	// parent array, d_isActive initialization is just one time. but d_cheapest needs to reset after every round its done using the cudaMemset
 	int Blocks = (G.nodes + TPB - 1 ) / TPB; 
 	cudaMemset(d_isActive,1,G.nodes*sizeof(bool));
+	// finish the memset first, it is setup and not part of the timed Boruvka loop
+	cudaDeviceSynchronize();
 
-
-	
+	// Boruvka loop time starts here: init_parents_kernel + every round are counted,
+	// the allocations, H2D copies and the isActive memset above are not
 	auto boruvka_start = chrono::steady_clock::now();
 	init_parents_kernel<<<Blocks, TPB>>>(d_parent, G.nodes);
 	CHECK();
 
-	// memset + init kernel are async, finish them so they are not counted in the loop time
+	// wait for init_parents_kernel before the first round
 	cudaDeviceSynchronize();
 	while( h_changed ){
 
